@@ -3,7 +3,7 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from youtube_transcript_api import YouTubeTranscriptApi
-from langchain_chroma import Chroma
+from langchain_community.vectorstores import FAISS
 from dotenv import load_dotenv
 import streamlit as st
 import time
@@ -127,3 +127,66 @@ def generate_notes(transcript):
 
     except Exception as e:
         st.error(f"Error fething video {e}") 
+
+# FUNCTION TO CREATE CHUNKS
+def create_chunks(transcript):
+    text_splitters= RecursiveCharacterTextSplitter(chunk_size=10000,chunk_overlap=1000)
+    doc= text_splitters.create_documents([transcript])
+    return doc
+
+# function to create embedding and store it into an vector space.
+def create_vector_store(docs):
+    embedding= GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", transport="grpc" )
+    vector_store= FAISS.from_documents(docs, embedding)
+    return vector_store
+
+
+# RAG FUNCTION with Chat History Context
+def rag_answer(question, vectorstore, chat_history=None):
+    """
+    Generate an answer based on the retrieved context and chat history.
+    """
+    # Step 1: Retrieve similar chunks from the vector store
+    results = vectorstore.similarity_search(question, k=4)
+    context_text = "\n".join([i.page_content for i in results])
+
+    # Step 2: Format chat history (if any)
+    history_text = ""
+    if chat_history and len(chat_history) > 0:
+        history_text = "\n".join(
+            [f"User: {turn['user']}\nAssistant: {turn['assistant']}" for turn in chat_history]
+        )
+
+    # Step 3: Create a prompt that includes both context and history
+    prompt = ChatPromptTemplate.from_template("""
+    You are a kind, polite, and precise assistant helping the user based on a video transcript.
+
+    Rules:
+    - Use BOTH the retrieved video context and the previous chat history to understand the user’s intent.
+    - Maintain conversational flow — be aware of what was said earlier.
+    - Answer ONLY using the retrieved context or logically inferred information from it.
+    - If the answer is not in the context or chat history, say:
+      "I couldn’t find that information in the database. Could you please rephrase or ask something else?"
+    - Keep your answers concise, clear, and friendly.
+
+    ====== Retrieved Video Context ======
+    {context}
+
+    ====== Chat History ======
+    {history}
+
+    ====== User’s New Question ======
+    {question}
+
+    ====== Assistant’s Answer ======
+    """)
+
+    # Step 4: Run chain
+    chain = prompt | llm
+    response = chain.invoke({
+        "context": context_text,
+        "history": history_text,
+        "question": question
+    })
+
+    return response.content
